@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { signOut } from "firebase/auth";
+import { db, auth } from "./firebase";
 
 // ── Palette & design tokens ───────────────────────────────────────────────────
 const T = {
@@ -71,6 +74,7 @@ const ICONS = {
   target:     <g><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></g>,
   leaf:       <g><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></g>,
   bolt:       <g><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></g>,
+  key:        <g><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></g>,
   plane:      <g><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21 4 19 2c-2-2-4-2-5.5-.5L10 5 1.8 6.2l3.9 3.9L2.1 15l4.2 4.2 5.3-3.6 3.9 3.9 1.3-4.3z"/></g>,
   music:      <g><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></g>,
   heart:      <g><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></g>,
@@ -86,7 +90,7 @@ function Icon({ name, size=16, stroke, strokeWidth=1.5 }) {
 }
 
 // ── AI functions ──────────────────────────────────────────────────────────────
-async function classifyWithClaude(text, spaces, categories) {
+async function classifyWithClaude(text, spaces, categories, apiKey) {
   const spaceList = spaces.map(p => {
     const cat = categories.find(c => c.id === p.category);
     const examples = p.tasks.slice(-3).map(t => t.text).join(", ");
@@ -122,8 +126,8 @@ Réponds UNIQUEMENT en JSON valide, sans markdown:
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, messages:[{role:"user",content:prompt}] }),
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+    body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] }),
   });
   const data = await res.json();
   const raw = data.content?.[0]?.text || "{}";
@@ -135,7 +139,7 @@ Réponds UNIQUEMENT en JSON valide, sans markdown:
   } catch { return {tasks:[],newSpaces:[]}; }
 }
 
-async function buildFocusWithClaude(spaces, categories) {
+async function buildFocusWithClaude(spaces, categories, apiKey) {
   const all = spaces.flatMap(p => p.tasks.filter(t=>!t.done).map(t => ({
     id:t.id, text:t.text, priority:t.priority, reminder:t.reminder, createdAt:t.createdAt,
     spaceName:p.name, spaceId:p.id, spaceCategory:p.category,
@@ -147,8 +151,8 @@ Date: ${new Date().toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",mont
 Critères: 1) rappels proches 2) urgent 3) week en fin de semaine 4) tâches qui traînent 5) équilibre pro/perso 6) jamais 3 du même espace
 Réponds UNIQUEMENT en JSON: { "focus": [{ "id": "...", "reason": "max 10 mots" }] }`;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:prompt}]}),
+    method:"POST", headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:400,messages:[{role:"user",content:prompt}]}),
   });
   const data = await res.json();
   try {
@@ -175,6 +179,9 @@ const GLOBAL_STYLE = `
   @keyframes waveBar { 0%,100% { transform:scaleY(0.4); } 50% { transform:scaleY(1); } }
   @keyframes pulse   { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
   .label-up { text-transform: uppercase; letter-spacing: 0.12em; color: ${T.amberDark}; font-weight: 600; font-size: 11px; }
+  @media (max-width: 599px) { .hint-desktop { display: none !important; } }
+  @media (min-width: 600px) { .header-tabs-mobile { display: none !important; } .bottom-nav { display: none !important; } }
+  @media (max-width: 599px) { .header-tabs-desktop { display: none !important; } .header-tabs-mobile { display: none !important; } .main-content { padding-bottom: 72px !important; } }
 `;
 
 // ── InlineTitle ───────────────────────────────────────────────────────────────
@@ -358,7 +365,7 @@ function AllTasksView({ spaces, categories, onToggle, onDelete, onChangePriority
         const isEditing = editingId===task.id;
         const isPicking = prioPicking===task.id;
         return(
-          <div key={task.id} style={{display:"flex",flexDirection:"column",padding:"10px 14px",marginBottom:5,borderRadius:10,background:task.done?"transparent":T.paperCard,border:`1px solid ${task.done?"transparent":T.border}`,opacity:task.done?0.5:1,transition:"all 0.15s",animation:`slideUp 0.2s ease ${Math.min(i,15)*0.02}s both`}}>
+          <div key={task.id} className="task-row" style={{display:"flex",flexDirection:"column",padding:"10px 14px",marginBottom:5,borderRadius:10,background:task.done?"transparent":T.paperCard,border:`1px solid ${task.done?"transparent":T.border}`,opacity:task.done?0.5:1,transition:"all 0.15s",animation:`slideUp 0.2s ease ${Math.min(i,15)*0.02}s both`}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <button onClick={()=>onToggle(task.spaceId,task.id)} style={{width:17,height:17,borderRadius:"50%",flexShrink:0,border:`1.5px solid ${task.done?cfg.color:T.borderStrong}`,background:task.done?cfg.color:"transparent",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>
                 {task.done&&<Icon name="check" size={9} stroke="white" strokeWidth={2.5}/>}
@@ -374,20 +381,26 @@ function AllTasksView({ spaces, categories, onToggle, onDelete, onChangePriority
                   </div>
                 ):(
                   <div onDoubleClick={()=>{if(!task.done){setEditingId(task.id);setEditDraft(task.text);}}} title="Double-clic pour modifier"
-                    style={{fontSize:14,color:task.done?T.inkFaint:T.ink,textDecoration:task.done?"line-through":"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:task.done?"default":"text"}}>{task.text}</div>
+                    style={{fontSize:14,color:task.done?T.inkFaint:T.ink,textDecoration:task.done?"line-through":"none",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden",cursor:task.done?"default":"text",lineHeight:1.4}}>{task.text}</div>
                 )}
-                <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2}}>
-                  {cat&&<Icon name={cat.icon} size={11} stroke={T.inkFaint}/>}
-                  <button onClick={()=>onGoSpace(task.spaceId)} style={{fontSize:11,color:T.inkFaint,padding:0,transition:"color 0.15s"}}
+                <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2,overflow:"hidden",minWidth:0}}>
+                  {cat&&<Icon name={cat.icon} size={11} stroke={T.inkFaint} style={{flexShrink:0}}/>}
+                  <button onClick={()=>onGoSpace(task.spaceId)} style={{fontSize:11,color:T.inkFaint,padding:0,transition:"color 0.15s",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:1,minWidth:0}}
                     onMouseEnter={e=>e.currentTarget.style.color=T.amberDark} onMouseLeave={e=>e.currentTarget.style.color=T.inkFaint}>{task.spaceName}</button>
-                  {task.reminder&&<span style={{fontSize:11,color:T.amber,display:"inline-flex",alignItems:"center",gap:3}}><Icon name="bell" size={10}/>{task.reminder}</span>}
+                  {task.reminder&&<span style={{fontSize:11,color:T.amber,display:"inline-flex",alignItems:"center",gap:3,flexShrink:0,whiteSpace:"nowrap"}}><Icon name="bell" size={10}/>{task.reminder}</span>}
                 </div>
               </div>
               {!task.done&&(
-                <button onClick={()=>setPrioPicking(isPicking?null:task.id)} style={{flexShrink:0,display:"flex",alignItems:"center",gap:5,padding:"3px 9px",borderRadius:10,transition:"all 0.15s",background:isPicking?cfg.bg:"transparent",border:`1px solid ${isPicking?cfg.color:T.border}`}}>
-                  <span style={{width:7,height:7,borderRadius:"50%",background:cfg.color,display:"inline-block"}}/>
-                  <span style={{fontSize:11,color:cfg.text,fontWeight:500}}>{cfg.label}</span>
-                </button>
+                <div style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
+                  <button onClick={()=>setPrioPicking(isPicking?null:task.id)} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 9px",borderRadius:10,transition:"all 0.15s",background:isPicking?cfg.bg:"transparent",border:`1px solid ${isPicking?cfg.color:T.border}`}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:cfg.color,display:"inline-block"}}/>
+                    <span className="hint-desktop" style={{fontSize:11,color:cfg.text,fontWeight:500}}>{cfg.label}</span>
+                  </button>
+                  <button onClick={()=>onDelete(task.spaceId,task.id)} className="task-act"
+                    style={{opacity:0,transition:"opacity 0.15s",color:T.urgent,padding:"2px 5px"}}>
+                    <Icon name="trash" size={13}/>
+                  </button>
+                </div>
               )}
             </div>
             {isPicking&&(
@@ -473,13 +486,16 @@ function Onboarding({ categories, onDone }) {
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
-export default function BrainDump() {
+export default function BrainDump({ user }) {
+  const [apiKey,       setApiKey]       = useState(()=>localStorage.getItem("braindump_api_key")||"");
   const [onboarded,    setOnboarded]    = useState(false);
   const [view,         setView]         = useState("capture");
   const [input,        setInput]        = useState("");
   const [isListening,  setIsListening]  = useState(false);
   const [categories,   setCategories]   = useState(DEFAULT_CATEGORIES);
   const [spaces,       setSpaces]       = useState([]);
+  const [dataLoaded,   setDataLoaded]   = useState(false);
+  const dataLoadedRef  = useRef(false);
   const [loading,      setLoading]      = useState(false);
   const [toast,        setToast]        = useState(null);
   const [selectedSid,  setSelectedSid]  = useState(null);
@@ -490,10 +506,13 @@ export default function BrainDump() {
   const [newCatName,   setNewCatName]   = useState("");
   const [newCatIcon,   setNewCatIcon]   = useState("target");
   const [newCatColor,  setNewCatColor]  = useState(T.amber);
+  const [showCtxPicker,setShowCtxPicker] = useState(false);
   const [showAddSpace, setShowAddSpace] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState("");
   const [newSpaceCat,  setNewSpaceCat]  = useState("");
   const [confirmDelId, setConfirmDelId] = useState(null);
+  const [showApiKey,   setShowApiKey]   = useState(false);
+  const [apiKeyDraft,  setApiKeyDraft]  = useState("");
   const textareaRef    = useRef(null);
   const recognitionRef = useRef(null);
   const toastTimer     = useRef(null);
@@ -502,6 +521,28 @@ export default function BrainDump() {
   useEffect(()=>{
     if(toast){ if(toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current=setTimeout(()=>setToast(null),6000); }
   },[toast]);
+  useEffect(()=>{
+    getDoc(doc(db,"users",user.uid)).then(snap=>{
+      if(snap.exists()){
+        const d=snap.data();
+        if(d.spaces)     setSpaces(d.spaces);
+        if(d.categories) setCategories(d.categories);
+        if(d.onboarded!==undefined) setOnboarded(d.onboarded);
+      } else {
+        try {
+          const s=JSON.parse(localStorage.getItem("braindump_spaces")||"[]");
+          const c=JSON.parse(localStorage.getItem("braindump_categories")||"null")||DEFAULT_CATEGORIES;
+          const o=localStorage.getItem("braindump_onboarded")==="true";
+          setSpaces(s); setCategories(c); setOnboarded(o);
+        } catch {}
+      }
+      dataLoadedRef.current=true;
+      setDataLoaded(true);
+    });
+  },[user.uid]);
+  useEffect(()=>{ if(!dataLoadedRef.current) return; setDoc(doc(db,"users",user.uid),{onboarded},{merge:true}); },[onboarded,user.uid]);
+  useEffect(()=>{ if(!dataLoadedRef.current) return; setDoc(doc(db,"users",user.uid),{spaces},{merge:true}); },[spaces,user.uid]);
+  useEffect(()=>{ if(!dataLoadedRef.current) return; setDoc(doc(db,"users",user.uid),{categories},{merge:true}); },[categories,user.uid]);
 
   const startListening = useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -518,7 +559,7 @@ export default function BrainDump() {
     const text=contextMode?`[Contexte ${contextMode}] ${input}`:input;
     setLoading(true); setInput("");
     try {
-      const result=await classifyWithClaude(text,spaces,categories);
+      const result=await classifyWithClaude(text,spaces,categories,apiKey);
       if(result.tasks?.length){
         const newTasks=result.tasks.filter(t=>t.spaceId).map(t=>({id:generateId(),text:t.text,spaceId:t.spaceId,priority:t.priority==="maybe"?"backlog":t.priority||"backlog",reminder:t.reminder||null,done:false,createdAt:new Date().toISOString()}));
         if(newTasks.length){
@@ -547,7 +588,7 @@ export default function BrainDump() {
       }
     } catch { setToast({type:"error"}); }
     setLoading(false);
-  },[input,loading,contextMode,spaces,categories]);
+  },[input,loading,contextMode,spaces,categories,apiKey]);
 
   const handleKeyDown = e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)) handleSubmit(); };
 
@@ -580,9 +621,16 @@ export default function BrainDump() {
   };
   const loadFocus=useCallback(async()=>{
     setView("focus"); setFocusTasks(null);
-    const result=await buildFocusWithClaude(spaces,categories);
+    const result=await buildFocusWithClaude(spaces,categories,apiKey);
     setFocusTasks(result);
-  },[spaces,categories]);
+  },[spaces,categories,apiKey]);
+
+  if(!dataLoaded) return (
+    <>
+      <style>{GLOBAL_STYLE}</style>
+      <div style={{minHeight:"100vh",background:"#FFFDF5",display:"flex",alignItems:"center",justifyContent:"center",color:"#A08C5A",fontSize:14}}>Chargement…</div>
+    </>
+  );
 
   if(!onboarded) return (
     <>
@@ -593,50 +641,112 @@ export default function BrainDump() {
 
   const totalTasks=spaces.reduce((s,p)=>s+p.tasks.filter(t=>!t.done).length,0);
 
+  const TABS = [
+    {id:"capture", label:"Capturer", icon:"sparkle"},
+    {id:"all",     label:"Tâches",   icon:"check"},
+    {id:"spaces",  label:"Espaces",  icon:"home"},
+    {id:"focus",   label:"Aujourd'hui", icon:"target", action:loadFocus},
+  ];
+
   return (
     <div style={{minHeight:"100vh",background:T.paper,color:T.ink}}>
       <style>{GLOBAL_STYLE}</style>
 
       {/* Header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 24px",borderBottom:`1px solid ${T.border}`,background:T.paper,position:"sticky",top:0,zIndex:5}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <Icon name="brain" size={22} stroke={T.amberDark}/>
-          <span style={{fontWeight:600,fontSize:16,letterSpacing:"-0.02em",color:T.ink}}>BrainDump</span>
-        </div>
-        <div style={{display:"flex",gap:2}}>
-          {[
-            {id:"capture",label:"Capturer"},
-            {id:"all",    label:"Tâches"},
-            {id:"spaces", label:"Espaces"},
-            {id:"focus",  label:"Aujourd'hui",action:loadFocus},
-          ].map(tab=>(
-            <button key={tab.id} onClick={()=>tab.action?tab.action():setView(tab.id)}
-              style={{padding:"7px 14px",borderRadius:20,fontSize:13,fontWeight:500,background:view===tab.id?T.paperHover:"transparent",color:view===tab.id?T.ink:T.inkMuted,transition:"all 0.15s"}}>
-              {tab.label}
+      <div style={{background:T.paper,position:"sticky",top:0,zIndex:5,borderBottom:`1px solid ${T.border}`}}>
+        <div style={{display:"flex",alignItems:"center",padding:"12px 20px",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+            <Icon name="brain" size={20} stroke={T.amberDark}/>
+            <span style={{fontWeight:600,fontSize:15,letterSpacing:"-0.02em",color:T.ink}}>BrainDump</span>
+          </div>
+          {/* Onglets desktop */}
+          <div className="header-tabs-desktop" style={{display:"flex",gap:2,flex:1,justifyContent:"center"}}>
+            {TABS.map(tab=>(
+              <button key={tab.id} onClick={()=>tab.action?tab.action():setView(tab.id)}
+                style={{padding:"7px 14px",borderRadius:20,fontSize:13,fontWeight:500,background:view===tab.id?T.paperHover:"transparent",color:view===tab.id?T.ink:T.inkMuted,transition:"all 0.15s"}}>
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:"auto"}}>
+            <div style={{fontSize:12,color:T.inkFaint,fontFamily:"DM Mono,monospace"}}>{totalTasks} tâches</div>
+            <button onClick={()=>{setApiKeyDraft(apiKey);setShowApiKey(s=>!s);}}
+              title="Clé API"
+              style={{width:30,height:30,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:apiKey?"transparent":T.urgentBg,border:`1px solid ${apiKey?T.border:T.urgent}`,color:apiKey?T.inkFaint:T.urgent,transition:"all 0.15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=T.amber;e.currentTarget.style.color=T.amberDark;}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor=apiKey?T.border:T.urgent;e.currentTarget.style.color=apiKey?T.inkFaint:T.urgent;}}>
+              <Icon name="key" size={13}/>
             </button>
-          ))}
+            <button onClick={()=>signOut(auth)} title={user.email}
+              style={{width:30,height:30,borderRadius:"50%",background:T.amber,display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontSize:12,fontWeight:600,flexShrink:0,border:"none"}}>
+              {user.email[0].toUpperCase()}
+            </button>
+          </div>
         </div>
-        <div style={{fontSize:12,color:T.inkFaint,fontFamily:"DM Mono,monospace"}}>{totalTasks} tâches</div>
       </div>
+
+      {/* Bottom nav mobile */}
+      <div className="bottom-nav" style={{position:"fixed",bottom:0,left:0,right:0,background:T.paper,borderTop:`1px solid ${T.border}`,display:"flex",zIndex:10,paddingBottom:"env(safe-area-inset-bottom)"}}>
+        {TABS.map(tab=>(
+          <button key={tab.id} onClick={()=>tab.action?tab.action():setView(tab.id)}
+            style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"10px 4px 8px",background:"transparent",border:"none",color:view===tab.id?T.amberDark:T.inkFaint,transition:"color 0.15s"}}>
+            <Icon name={tab.icon} size={20} stroke={view===tab.id?T.amberDark:T.inkFaint}/>
+            <span style={{fontSize:10,fontWeight:view===tab.id?600:400}}>{tab.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {showApiKey&&(
+        <div style={{background:T.paperCard,borderBottom:`1px solid ${T.amber}`,padding:"12px 24px",display:"flex",alignItems:"center",gap:10,animation:"slideUp 0.15s ease"}}>
+          <span style={{fontSize:12,color:T.inkMuted,whiteSpace:"nowrap"}}>Clé API Anthropic</span>
+          <input type="password" value={apiKeyDraft} onChange={e=>setApiKeyDraft(e.target.value)}
+            onKeyDown={e=>{
+              if(e.key==="Enter"){localStorage.setItem("braindump_api_key",apiKeyDraft.trim());setApiKey(apiKeyDraft.trim());setShowApiKey(false);}
+              if(e.key==="Escape")setShowApiKey(false);
+            }}
+            placeholder="sk-ant-…" autoFocus
+            style={{flex:1,fontSize:13,fontFamily:"DM Mono,monospace",color:T.ink,background:T.paper,border:`1px solid ${T.border}`,borderRadius:8,padding:"7px 11px"}}/>
+          <button onClick={()=>{localStorage.setItem("braindump_api_key",apiKeyDraft.trim());setApiKey(apiKeyDraft.trim());setShowApiKey(false);}}
+            style={{padding:"7px 16px",borderRadius:10,fontSize:13,fontWeight:500,background:T.gradBtn,color:"white",flexShrink:0}}>
+            Enregistrer
+          </button>
+          <button onClick={()=>setShowApiKey(false)}
+            style={{padding:"7px 10px",borderRadius:10,fontSize:13,color:T.inkMuted,border:`1px solid ${T.border}`,background:T.paperHover,flexShrink:0}}>
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* CAPTURE */}
       {view==="capture"&&(
-        <div style={{maxWidth:580,margin:"0 auto",padding:"32px 20px"}}>
-          <div style={{marginBottom:18}}>
-            <div className="label-up" style={{marginBottom:10}}>Mode contexte</div>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              {spaces.map(p=>{const active=contextMode===p.name;return(
-                <button key={p.id} onClick={()=>setContextMode(active?null:p.name)}
-                  style={{padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:500,border:`1px solid ${active?T.amber:T.border}`,background:active?T.paperCard:"transparent",color:active?T.amberDark:T.inkMuted,transition:"all 0.15s",display:"inline-flex",alignItems:"center",gap:6}}>
-                  {active&&<span style={{width:6,height:6,borderRadius:"50%",background:T.amber,display:"inline-block",animation:"pulse 1.5s infinite"}}/>}{p.name}
-                </button>
-              );})}
+        <div className="main-content" style={{maxWidth:580,margin:"0 auto",padding:"32px 20px"}}>
+          {!apiKey&&(
+            <div style={{marginBottom:18,padding:"11px 16px",borderRadius:12,background:T.urgentBg,border:`1px solid rgba(184,92,74,0.3)`,display:"flex",alignItems:"center",gap:10}}>
+              <Icon name="key" size={14} stroke={T.urgentText}/>
+              <span style={{fontSize:13,color:T.urgentText,flex:1}}>Clé API manquante — l'IA ne fonctionnera pas.</span>
+              <button onClick={()=>{setApiKeyDraft("");setShowApiKey(true);}} style={{fontSize:12,padding:"4px 12px",borderRadius:8,background:T.urgent,color:"white",fontWeight:500,flexShrink:0}}>Configurer</button>
             </div>
+          )}
+          <div style={{marginBottom:18}}>
+            <button className="label-up" onClick={()=>setShowCtxPicker(s=>!s)} style={{marginBottom:10,background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+              Mode contexte
+              <span style={{fontSize:10,color:T.inkFaint}}>{showCtxPicker?"▲":"▼"}</span>
+            </button>
+            {showCtxPicker&&(
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {spaces.map(p=>{const active=contextMode===p.name;return(
+                  <button key={p.id} onClick={()=>{setContextMode(active?null:p.name);setShowCtxPicker(false);}}
+                    style={{padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:500,border:`1px solid ${active?T.amber:T.border}`,background:active?T.paperCard:"transparent",color:active?T.amberDark:T.inkMuted,transition:"all 0.15s",display:"inline-flex",alignItems:"center",gap:6}}>
+                    {active&&<span style={{width:6,height:6,borderRadius:"50%",background:T.amber,display:"inline-block",animation:"pulse 1.5s infinite"}}/>}{p.name}
+                  </button>
+                );})}
+              </div>
+            )}
             {contextMode&&(
               <div style={{marginTop:8,fontSize:12,color:T.amberDark,display:"flex",alignItems:"center",gap:6}}>
                 <span style={{width:6,height:6,borderRadius:"50%",background:T.amber,display:"inline-block",animation:"pulse 1.5s infinite"}}/>
                 Tout ira dans <strong style={{marginLeft:2}}>{contextMode}</strong>
-                <button onClick={()=>setContextMode(null)} style={{marginLeft:8,fontSize:11,color:T.inkMuted,padding:"2px 8px",border:`1px solid ${T.border}`,borderRadius:10,background:T.paperHover}}>Fin</button>
+                <button onClick={()=>{setContextMode(null);setShowCtxPicker(false);}} style={{marginLeft:8,fontSize:11,color:T.inkMuted,padding:"2px 8px",border:`1px solid ${T.border}`,borderRadius:10,background:T.paperHover}}>Fin</button>
               </div>
             )}
           </div>
@@ -647,24 +757,16 @@ export default function BrainDump() {
                 <textarea ref={textareaRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={handleKeyDown}
                   placeholder={contextMode?`Contexte actif : ${contextMode}…`:"Vide ta tête ici."}
                   rows={5} style={{width:"100%",fontSize:16,lineHeight:1.65,fontWeight:400,color:T.ink}}/>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:14,paddingTop:14,borderTop:`1px solid ${T.border}`,gap:14}}>
-                  <button onClick={startListening} style={{width:42,height:42,borderRadius:"50%",background:T.paperHover,border:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"center",color:T.amberDark,flexShrink:0,transition:"all 0.15s"}}
-                    onMouseEnter={e=>{e.currentTarget.style.borderColor=T.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;}}>
-                    <Icon name="mic" size={18}/>
-                  </button>
-                  <div style={{display:"flex",gap:8,flex:1,justifyContent:"center",flexWrap:"wrap"}}>
-                    {[", sépare","↵ sépare","! urgent","⌘↵ ranger"].map((h,i,arr)=>(
-                      <span key={h} style={{display:"inline-flex",alignItems:"center",gap:8}}>
-                        <span style={{fontSize:11,color:T.inkFaint,fontFamily:"DM Mono,monospace"}}>{h}</span>
-                        {i<arr.length-1&&<span style={{fontSize:11,color:T.border}}>·</span>}
-                      </span>
-                    ))}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:14,gap:14}}>
+                    <button onClick={startListening} style={{width:42,height:42,borderRadius:"50%",background:T.paperHover,border:`1px solid ${T.border}`,display:"flex",alignItems:"center",justifyContent:"center",color:T.amberDark,flexShrink:0,transition:"all 0.15s"}}
+                      onMouseEnter={e=>{e.currentTarget.style.borderColor=T.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;}}>
+                      <Icon name="mic" size={18}/>
+                    </button>
+                    <button onClick={handleSubmit} disabled={!input.trim()||loading}
+                      style={{padding:"9px 20px",borderRadius:20,fontSize:14,fontWeight:600,background:input.trim()&&!loading?T.gradBtn:T.paperHover,color:input.trim()&&!loading?"white":T.inkFaint,transition:"all 0.2s",display:"inline-flex",alignItems:"center",gap:7,flexShrink:0}}>
+                      {loading?<><span style={{width:13,height:13,border:`2px solid rgba(255,255,255,0.3)`,borderTopColor:"white",borderRadius:"50%",display:"inline-block",animation:"spin 0.7s linear infinite"}}/>Analyse…</>:<>Ranger<Icon name="arrowRight" size={15} stroke="white"/></>}
+                    </button>
                   </div>
-                  <button onClick={handleSubmit} disabled={!input.trim()||loading}
-                    style={{padding:"9px 20px",borderRadius:20,fontSize:14,fontWeight:600,background:input.trim()&&!loading?T.gradBtn:T.paperHover,color:input.trim()&&!loading?"white":T.inkFaint,transition:"all 0.2s",display:"inline-flex",alignItems:"center",gap:7,flexShrink:0}}>
-                    {loading?<><span style={{width:13,height:13,border:`2px solid rgba(255,255,255,0.3)`,borderTopColor:"white",borderRadius:"50%",display:"inline-block",animation:"spin 0.7s linear infinite"}}/>Analyse…</>:<>Ranger<Icon name="arrowRight" size={15} stroke="white"/></>}
-                  </button>
-                </div>
               </>
             ):(
               <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:18,padding:"16px 0"}}>
@@ -675,6 +777,15 @@ export default function BrainDump() {
                 <button onClick={stopListening} style={{width:52,height:52,borderRadius:"50%",background:T.urgent,display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontSize:20}}>■</button>
               </div>
             )}
+          </div>
+
+          <div style={{display:"flex",gap:0,marginTop:10,paddingLeft:2,flexWrap:"wrap",alignItems:"center"}}>
+            {[", sépare","↵ sépare","! urgent","⌘↵ ranger"].map((h,i)=>(
+              <span key={h} className={h==="⌘↵ ranger"?"hint-desktop":""} style={{display:"inline-flex",alignItems:"center"}}>
+                {i>0&&<span style={{fontSize:13,color:T.borderStrong,margin:"0 7px",lineHeight:1}}>/</span>}
+                <span style={{fontSize:11,color:T.inkFaint,fontFamily:"DM Mono,monospace"}}>{h}</span>
+              </span>
+            ))}
           </div>
 
           {toast&&(
