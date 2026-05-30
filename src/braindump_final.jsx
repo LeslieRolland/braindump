@@ -131,6 +131,7 @@ const GLOBAL_STYLE = `
   @media (max-width: 599px) { .hint-desktop { display: none !important; } }
   @media (min-width: 600px) { .header-tabs-mobile { display: none !important; } .bottom-nav { display: none !important; } }
   @media (max-width: 599px) { .header-tabs-desktop { display: none !important; } .header-tabs-mobile { display: none !important; } .main-content { padding-bottom: 72px !important; } }
+  .bottom-nav { padding-bottom: env(safe-area-inset-bottom); }
 `;
 
 // ── InlineTitle ───────────────────────────────────────────────────────────────
@@ -625,7 +626,7 @@ export default function BrainDump({ user }) {
       </div>
 
       {/* Bottom nav mobile */}
-      <div className="bottom-nav" style={{position:"fixed",bottom:0,left:0,right:0,background:T.paper,borderTop:`1px solid ${T.border}`,display:"flex",zIndex:10,paddingBottom:"env(safe-area-inset-bottom)"}}>
+      <div className="bottom-nav" style={{position:"fixed",bottom:0,left:0,right:0,background:T.paper,borderTop:`1px solid ${T.border}`,display:"flex",zIndex:10}}>
         {TABS.map(tab=>(
           <button key={tab.id} onClick={()=>tab.action?tab.action():setView(tab.id)}
             style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3,padding:"10px 4px 8px",background:"transparent",border:"none",color:view===tab.id?T.amberDark:T.inkFaint,transition:"color 0.15s"}}>
