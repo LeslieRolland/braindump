@@ -90,77 +90,26 @@ function Icon({ name, size=16, stroke, strokeWidth=1.5 }) {
 }
 
 // ── AI functions ──────────────────────────────────────────────────────────────
-async function classifyWithClaude(text, spaces, categories, apiKey) {
-  const spaceList = spaces.map(p => {
-    const cat = categories.find(c => c.id === p.category);
-    const examples = p.tasks.slice(-3).map(t => t.text).join(", ");
-    const hint = examples ? ` | tâches existantes: "${examples}"` : "";
-    return `- id: ${p.id}, nom: "${p.name}", catégorie: ${cat?.label || p.category}${hint}`;
-  }).join("\n");
-
-  const prompt = `Tu es un assistant de productivité. Analyse ce texte et extrais les tâches.
-
-Espaces disponibles:
-${spaceList}
-
-Catégories: ${categories.map(c => `${c.id} (${c.label})`).join(", ")}
-
-Texte: "${text}"
-
-Règles:
-- PAR DÉFAUT : 1 prompt = 1 tâche. Regroupe en une phrase claire. Découpe SEULEMENT si l'utilisateur utilise une virgule entre deux actions distinctes, "+" / "et", OU un retour à la ligne — chaque ligne = une tâche distincte.
-- MATCHING D'ESPACE :
-  · BON MATCH : le sujet de la tâche correspond vraiment à l'espace → utilise cet espace
-  · MAUVAIS MATCH : ne pas forcer, proposer un newSpace
-  · Si les tâches existantes d'un espace ressemblent sémantiquement → utilise cet espace
-- Si aucun espace ne correspond vraiment → mets spaceId à null et propose un newSpace générique
-- Un newSpace doit être un DOMAINE LARGE, jamais la tâche elle-même
-- PRIORITÉ : 1) "!" en fin = urgent  2) mots temporels ("ce soir","demain" = urgent, "lundi","semaine" = week)  3) déduction (vague = backlog)
-- reminder: marqueur temporel précis ou null
-
-Réponds UNIQUEMENT en JSON valide, sans markdown:
-{
-  "tasks": [{ "text": "tâche", "spaceId": "id ou null", "priority": "urgent|week|backlog", "reminder": "texte ou null" }],
-  "newSpaces": [{ "name": "Nom large", "category": "id catégorie", "tasks": [{"text":"tâche","priority":"backlog","reminder":null}] }]
-}`;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+async function classifyWithClaude(text, spaces, categories) {
+  const res = await fetch("/api/classify", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-    body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, spaces, categories }),
   });
-  const data = await res.json();
-  const raw = data.content?.[0]?.text || "{}";
-  try {
-    const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
-    if (parsed.tasks) parsed.tasks = parsed.tasks.map(t => ({...t, spaceId: t.spaceId||t.projectId||null}));
-    if (parsed.newProjects) parsed.newSpaces = parsed.newSpaces||parsed.newProjects;
-    return parsed;
-  } catch { return {tasks:[],newSpaces:[]}; }
+  try { return await res.json(); } catch { return { tasks: [], newSpaces: [] }; }
 }
 
-async function buildFocusWithClaude(spaces, categories, apiKey) {
-  const all = spaces.flatMap(p => p.tasks.filter(t=>!t.done).map(t => ({
-    id:t.id, text:t.text, priority:t.priority, reminder:t.reminder, createdAt:t.createdAt,
-    spaceName:p.name, spaceId:p.id, spaceCategory:p.category,
-  })));
-  if (!all.length) return [];
-  const prompt = `Choisis les 3 meilleures tâches à faire aujourd'hui.
-Tâches: ${JSON.stringify(all)}
-Date: ${new Date().toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"})}
-Critères: 1) rappels proches 2) urgent 3) week en fin de semaine 4) tâches qui traînent 5) équilibre pro/perso 6) jamais 3 du même espace
-Réponds UNIQUEMENT en JSON: { "focus": [{ "id": "...", "reason": "max 10 mots" }] }`;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST", headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:400,messages:[{role:"user",content:prompt}]}),
+async function buildFocusWithClaude(spaces, categories) {
+  const res = await fetch("/api/focus", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spaces, categories }),
   });
-  const data = await res.json();
   try {
-    const result = JSON.parse((data.content?.[0]?.text||"{}").replace(/```json|```/g,"").trim());
-    return (result.focus||[]).map(f=>{const t=all.find(x=>x.id===f.id);return t?{...t,reason:f.reason}:null;}).filter(Boolean);
-  } catch {
-    return [...all.filter(t=>t.priority==="urgent").slice(0,2),...all.filter(t=>t.priority==="week").slice(0,1)].slice(0,3);
-  }
+    const focus = await res.json();
+    if (!Array.isArray(focus)) return [];
+    return focus;
+  } catch { return []; }
 }
 
 // ── Global styles ─────────────────────────────────────────────────────────────
@@ -487,7 +436,6 @@ function Onboarding({ categories, onDone }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function BrainDump({ user }) {
-  const [apiKey,       setApiKey]       = useState(()=>localStorage.getItem("braindump_api_key")||"");
   const [onboarded,    setOnboarded]    = useState(false);
   const [view,         setView]         = useState("capture");
   const [input,        setInput]        = useState("");
@@ -511,8 +459,6 @@ export default function BrainDump({ user }) {
   const [newSpaceName, setNewSpaceName] = useState("");
   const [newSpaceCat,  setNewSpaceCat]  = useState("");
   const [confirmDelId, setConfirmDelId] = useState(null);
-  const [showApiKey,   setShowApiKey]   = useState(false);
-  const [apiKeyDraft,  setApiKeyDraft]  = useState("");
   const textareaRef    = useRef(null);
   const recognitionRef = useRef(null);
   const toastTimer     = useRef(null);
@@ -559,7 +505,7 @@ export default function BrainDump({ user }) {
     const text=contextMode?`[Contexte ${contextMode}] ${input}`:input;
     setLoading(true); setInput("");
     try {
-      const result=await classifyWithClaude(text,spaces,categories,apiKey);
+      const result=await classifyWithClaude(text,spaces,categories);
       if(result.tasks?.length){
         const newTasks=result.tasks.filter(t=>t.spaceId).map(t=>({id:generateId(),text:t.text,spaceId:t.spaceId,priority:t.priority==="maybe"?"backlog":t.priority||"backlog",reminder:t.reminder||null,done:false,createdAt:new Date().toISOString()}));
         if(newTasks.length){
@@ -588,7 +534,7 @@ export default function BrainDump({ user }) {
       }
     } catch { setToast({type:"error"}); }
     setLoading(false);
-  },[input,loading,contextMode,spaces,categories,apiKey]);
+  },[input,loading,contextMode,spaces,categories]);
 
   const handleKeyDown = e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)) handleSubmit(); };
 
@@ -621,9 +567,9 @@ export default function BrainDump({ user }) {
   };
   const loadFocus=useCallback(async()=>{
     setView("focus"); setFocusTasks(null);
-    const result=await buildFocusWithClaude(spaces,categories,apiKey);
+    const result=await buildFocusWithClaude(spaces,categories);
     setFocusTasks(result);
-  },[spaces,categories,apiKey]);
+  },[spaces,categories]);
 
   if(!dataLoaded) return (
     <>
@@ -670,13 +616,6 @@ export default function BrainDump({ user }) {
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:"auto"}}>
             <div style={{fontSize:12,color:T.inkFaint,fontFamily:"DM Mono,monospace"}}>{totalTasks} tâches</div>
-            <button onClick={()=>{setApiKeyDraft(apiKey);setShowApiKey(s=>!s);}}
-              title="Clé API"
-              style={{width:30,height:30,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:apiKey?"transparent":T.urgentBg,border:`1px solid ${apiKey?T.border:T.urgent}`,color:apiKey?T.inkFaint:T.urgent,transition:"all 0.15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor=T.amber;e.currentTarget.style.color=T.amberDark;}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor=apiKey?T.border:T.urgent;e.currentTarget.style.color=apiKey?T.inkFaint:T.urgent;}}>
-              <Icon name="key" size={13}/>
-            </button>
             <button onClick={()=>signOut(auth)} title={user.email}
               style={{width:30,height:30,borderRadius:"50%",background:T.amber,display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontSize:12,fontWeight:600,flexShrink:0,border:"none"}}>
               {user.email[0].toUpperCase()}
@@ -696,37 +635,9 @@ export default function BrainDump({ user }) {
         ))}
       </div>
 
-      {showApiKey&&(
-        <div style={{background:T.paperCard,borderBottom:`1px solid ${T.amber}`,padding:"12px 24px",display:"flex",alignItems:"center",gap:10,animation:"slideUp 0.15s ease"}}>
-          <span style={{fontSize:12,color:T.inkMuted,whiteSpace:"nowrap"}}>Clé API Anthropic</span>
-          <input type="password" value={apiKeyDraft} onChange={e=>setApiKeyDraft(e.target.value)}
-            onKeyDown={e=>{
-              if(e.key==="Enter"){localStorage.setItem("braindump_api_key",apiKeyDraft.trim());setApiKey(apiKeyDraft.trim());setShowApiKey(false);}
-              if(e.key==="Escape")setShowApiKey(false);
-            }}
-            placeholder="sk-ant-…" autoFocus
-            style={{flex:1,fontSize:13,fontFamily:"DM Mono,monospace",color:T.ink,background:T.paper,border:`1px solid ${T.border}`,borderRadius:8,padding:"7px 11px"}}/>
-          <button onClick={()=>{localStorage.setItem("braindump_api_key",apiKeyDraft.trim());setApiKey(apiKeyDraft.trim());setShowApiKey(false);}}
-            style={{padding:"7px 16px",borderRadius:10,fontSize:13,fontWeight:500,background:T.gradBtn,color:"white",flexShrink:0}}>
-            Enregistrer
-          </button>
-          <button onClick={()=>setShowApiKey(false)}
-            style={{padding:"7px 10px",borderRadius:10,fontSize:13,color:T.inkMuted,border:`1px solid ${T.border}`,background:T.paperHover,flexShrink:0}}>
-            ✕
-          </button>
-        </div>
-      )}
-
       {/* CAPTURE */}
       {view==="capture"&&(
         <div className="main-content" style={{maxWidth:580,margin:"0 auto",padding:"32px 20px"}}>
-          {!apiKey&&(
-            <div style={{marginBottom:18,padding:"11px 16px",borderRadius:12,background:T.urgentBg,border:`1px solid rgba(184,92,74,0.3)`,display:"flex",alignItems:"center",gap:10}}>
-              <Icon name="key" size={14} stroke={T.urgentText}/>
-              <span style={{fontSize:13,color:T.urgentText,flex:1}}>Clé API manquante — l'IA ne fonctionnera pas.</span>
-              <button onClick={()=>{setApiKeyDraft("");setShowApiKey(true);}} style={{fontSize:12,padding:"4px 12px",borderRadius:8,background:T.urgent,color:"white",fontWeight:500,flexShrink:0}}>Configurer</button>
-            </div>
-          )}
           <div style={{marginBottom:18}}>
             <button className="label-up" onClick={()=>setShowCtxPicker(s=>!s)} style={{marginBottom:10,background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
               Mode contexte
